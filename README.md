@@ -1,184 +1,226 @@
-# 🏗️ Angular 18 — Clean Architecture & JWT
+# 🏛️ Symfony 6 + API Platform — Clean Architecture & DDD
 
-Un projet Angular qui "marche" est facile à faire. Un projet Angular qu'un
-autre développeur peut reprendre, modifier, étendre six mois plus tard sans
-tout casser — c'est une autre histoire. Ce projet applique une architecture
-modulaire stricte, avec une séparation claire des responsabilités, un système
-JWT complet et une base conçue pour durer.
-
----
-
-## Architecture modulaire — structure des dossiers
-
-```
-  src/app/
-  │
-  ├── core/                     ← services singleton, guards, interceptors
-  │   ├── guards/
-  │   │   ├── auth.guard.ts         ← redirige si non authentifié
-  │   │   └── role.guard.ts         ← vérifie le rôle (ADMIN, USER, etc.)
-  │   ├── interceptors/
-  │   │   ├── jwt.interceptor.ts    ← injecte le token dans chaque requête
-  │   │   └── error.interceptor.ts  ← gestion centralisée des erreurs HTTP
-  │   ├── services/
-  │   │   └── auth.service.ts       ← login, logout, refresh token
-  │   └── core.module.ts            ← forRoot guard : importé une seule fois
-  │
-  ├── features/                 ← modules fonctionnels, lazy-loadés
-  │   ├── dashboard/
-  │   │   ├── components/
-  │   │   ├── services/
-  │   │   └── dashboard.module.ts
-  │   └── settings/
-  │       ├── components/
-  │       └── settings.module.ts
-  │
-  ├── shared/                   ← composants/pipes/directives réutilisables
-  │   ├── components/
-  │   │   ├── navbar/
-  │   │   └── spinner/
-  │   ├── directives/
-  │   │   └── has-role.directive.ts  ← *hasRole="'ADMIN'"
-  │   ├── pipes/
-  │   └── shared.module.ts
-  │
-  └── app-routing.module.ts     ← routing principal avec lazy loading
-```
+Une refonte d'application legacy comme Hermes 2 ne se fait pas en ajoutant
+des features sur du code existant — elle se fait en posant une architecture
+nouvelle, modulaire, testable, que l'on peut faire évoluer sans tout casser.
+Ce projet implémente cette architecture en Symfony 6 + API Platform 3,
+avec une structuration DDD par contextes métier.
 
 ---
 
-## Lazy loading — routing configuré
+## Architecture par contextes — structure DDD
 
-```typescript
-// app-routing.module.ts
-const routes: Routes = [
-  {
-    path: 'dashboard',
-    canActivate: [AuthGuard],
-    loadChildren: () =>
-      import('./features/dashboard/dashboard.module')
-        .then(m => m.DashboardModule)
-  },
-  {
-    path: 'admin',
-    canActivate: [AuthGuard, RoleGuard],
-    data: { roles: ['ADMIN'] },
-    loadChildren: () =>
-      import('./features/admin/admin.module')
-        .then(m => m.AdminModule)
-  },
-  {
-    path: 'auth',
-    loadChildren: () =>
-      import('./features/auth/auth.module')
-        .then(m => m.AuthModule)
-  },
-  { path: '', redirectTo: '/dashboard', pathMatch: 'full' },
-  { path: '**', redirectTo: '/auth/login' }
-];
-
-// Résultat : le bundle initial ne charge que ce qui est nécessaire.
-// Les modules Feature sont chargés à la demande — première navigation
-// vers /dashboard = chargement de DashboardModule uniquement.
+```
+  src/
+  │
+  ├── Common/                    ← éléments partagés entre contextes
+  │   ├── Application/
+  │   │   └── Dto/
+  │   │       └── RequestDtoInterface.php
+  │   ├── Domain/
+  │   │   └── Bus/               ← interfaces Command/Query bus
+  │   └── Infrastructure/
+  │       └── Symfony/           ← résolveurs Symfony custom
+  │
+  ├── User/                      ← contexte User (DDD Bounded Context)
+  │   ├── Application/
+  │   │   ├── Command/           ← CreateUserCommand, UpdateUserCommand
+  │   │   ├── Query/             ← GetUserQuery, ListUsersQuery
+  │   │   └── Handler/           ← un handler par command/query
+  │   ├── Domain/
+  │   │   ├── Entity/
+  │   │   │   └── User.php       ← entité domain pure, sans annotation Doctrine
+  │   │   ├── Repository/
+  │   │   │   └── UserRepositoryInterface.php  ← contrat, pas d'EF
+  │   │   └── Event/
+  │   │       └── UserCreatedEvent.php
+  │   └── Infrastructure/
+  │       ├── Persistence/
+  │       │   └── DoctrineUserRepository.php   ← implémente l'interface
+  │       └── Api/
+  │           └── UserController.php           ← entrée API Platform
+  │
+  ├── Messaging/                 ← contexte Messagerie
+  └── Authentication/            ← contexte Auth (JWT)
 ```
 
 ---
 
-## JWT Interceptor — injection automatique du token
+## Entité Domain — pure, sans annotation Doctrine
 
-```typescript
-// core/interceptors/jwt.interceptor.ts
-import { Injectable } from '@angular/core';
-import {
-  HttpRequest, HttpHandler, HttpEvent,
-  HttpInterceptor, HttpErrorResponse
-} from '@angular/common/http';
-import { Observable, throwError, BehaviorSubject } from 'rxjs';
-import { catchError, filter, take, switchMap } from 'rxjs/operators';
-import { AuthService } from '../services/auth.service';
+```php
+// User/Domain/Entity/User.php
+// Zéro dépendance à Doctrine ou Symfony dans le Domain
 
-@Injectable()
-export class JwtInterceptor implements HttpInterceptor {
+declare(strict_types=1);
 
-  private isRefreshing = false;
-  private refreshTokenSubject = new BehaviorSubject<string | null>(null);
+namespace App\User\Domain\Entity;
 
-  constructor(private authService: AuthService) {}
+use App\User\Domain\Event\UserCreatedEvent;
 
-  intercept(req: HttpRequest<any>, next: HttpHandler): Observable<HttpEvent<any>> {
-    const token = this.authService.getAccessToken();
+final class User
+{
+    private array $domainEvents = [];
 
-    // Injecter le token si présent
-    const authReq = token ? this.addToken(req, token) : req;
+    public function __construct(
+        private readonly UserId    $id,
+        private string             $email,
+        private string             $passwordHash,
+        private UserRole           $role = UserRole::USER,
+        private \DateTimeImmutable $createdAt = new \DateTimeImmutable(),
+    ) {}
 
-    return next.handle(authReq).pipe(
-      catchError(error => {
-        if (error instanceof HttpErrorResponse && error.status === 401) {
-          return this.handle401(req, next);
-        }
-        return throwError(() => error);
-      })
-    );
-  }
-
-  private addToken(req: HttpRequest<any>, token: string): HttpRequest<any> {
-    return req.clone({
-      setHeaders: { Authorization: `Bearer ${token}` }
-    });
-  }
-
-  private handle401(req: HttpRequest<any>, next: HttpHandler): Observable<HttpEvent<any>> {
-    if (!this.isRefreshing) {
-      this.isRefreshing = true;
-      this.refreshTokenSubject.next(null);
-
-      return this.authService.refreshToken().pipe(
-        switchMap(tokens => {
-          this.isRefreshing = false;
-          this.refreshTokenSubject.next(tokens.accessToken);
-          return next.handle(this.addToken(req, tokens.accessToken));
-        }),
-        catchError(err => {
-          this.isRefreshing = false;
-          this.authService.logout();
-          return throwError(() => err);
-        })
-      );
+    public static function create(UserId $id, string $email, string $passwordHash): self
+    {
+        $user = new self($id, $email, $passwordHash);
+        $user->raise(new UserCreatedEvent($id, $email));
+        return $user;
     }
 
-    // Mettre les requêtes en attente pendant le refresh
-    return this.refreshTokenSubject.pipe(
-      filter(token => token !== null),
-      take(1),
-      switchMap(token => next.handle(this.addToken(req, token!)))
-    );
-  }
+    public function changeEmail(string $newEmail): void
+    {
+        if (!filter_var($newEmail, FILTER_VALIDATE_EMAIL)) {
+            throw new \InvalidArgumentException("Email invalide : $newEmail");
+        }
+        $this->email = $newEmail;
+    }
+
+    public function promote(UserRole $role): void
+    {
+        $this->role = $role;
+    }
+
+    // Domain Events — collectés, dispatchés par l'Infrastructure
+    public function raise(object $event): void
+    {
+        $this->domainEvents[] = $event;
+    }
+
+    public function pullDomainEvents(): array
+    {
+        $events = $this->domainEvents;
+        $this->domainEvents = [];
+        return $events;
+    }
+
+    // Getters
+    public function getId(): UserId    { return $this->id; }
+    public function getEmail(): string { return $this->email; }
+    public function getRole(): UserRole { return $this->role; }
 }
 ```
 
 ---
 
-## Route Guard par rôle
+## Repository — interface dans le Domain, implémentation dans l'Infrastructure
 
-```typescript
-// core/guards/role.guard.ts
-@Injectable({ providedIn: 'root' })
-export class RoleGuard implements CanActivate {
+```php
+// User/Domain/Repository/UserRepositoryInterface.php
+interface UserRepositoryInterface
+{
+    public function findById(UserId $id): ?User;
+    public function findByEmail(string $email): ?User;
+    public function save(User $user): void;
+    public function delete(UserId $id): void;
+}
 
-  constructor(private authService: AuthService, private router: Router) {}
+// User/Infrastructure/Persistence/DoctrineUserRepository.php
+final class DoctrineUserRepository implements UserRepositoryInterface
+{
+    public function __construct(
+        private readonly EntityManagerInterface $em
+    ) {}
 
-  canActivate(route: ActivatedRouteSnapshot): boolean {
-    const requiredRoles: string[] = route.data['roles'] ?? [];
-    const userRoles = this.authService.getUserRoles();
-
-    const hasAccess = requiredRoles.some(role => userRoles.includes(role));
-
-    if (!hasAccess) {
-      this.router.navigate(['/unauthorized']);
-      return false;
+    public function findById(UserId $id): ?User
+    {
+        return $this->em->find(UserEntity::class, $id->value());
     }
-    return true;
-  }
+
+    public function save(User $user): void
+    {
+        // Mapper Domain → Entity Doctrine
+        $entity = UserEntityMapper::fromDomain($user);
+        $this->em->persist($entity);
+        $this->em->flush();
+
+        // Dispatcher les Domain Events après la persistance
+        foreach ($user->pullDomainEvents() as $event) {
+            $this->eventDispatcher->dispatch($event);
+        }
+    }
+}
+```
+
+---
+
+## Command Handler — orchestration sans couplage à l'Infrastructure
+
+```php
+// User/Application/Handler/CreateUserHandler.php
+final readonly class CreateUserHandler
+{
+    public function __construct(
+        private UserRepositoryInterface $users,
+        private PasswordHasherInterface $hasher,
+    ) {}
+
+    public function __invoke(CreateUserCommand $command): UserId
+    {
+        // Vérifier unicité
+        if ($this->users->findByEmail($command->email) !== null) {
+            throw new UserAlreadyExistsException($command->email);
+        }
+
+        // Créer l'entité domain
+        $id   = UserId::generate();
+        $hash = $this->hasher->hash($command->password);
+        $user = User::create($id, $command->email, $hash);
+
+        // Persister (Domain Events dispatchés dans le repository)
+        $this->users->save($user);
+
+        return $id;
+    }
+}
+```
+
+---
+
+## Tests PHPUnit — handler isolé sans base de données
+
+```php
+class CreateUserHandlerTest extends TestCase
+{
+    private MockObject $repoMock;
+    private MockObject $hasherMock;
+    private CreateUserHandler $handler;
+
+    protected function setUp(): void
+    {
+        $this->repoMock   = $this->createMock(UserRepositoryInterface::class);
+        $this->hasherMock = $this->createMock(PasswordHasherInterface::class);
+        $this->handler    = new CreateUserHandler($this->repoMock, $this->hasherMock);
+    }
+
+    public function testCreateUserSuccessfully(): void
+    {
+        $this->repoMock->method('findByEmail')->willReturn(null);
+        $this->hasherMock->method('hash')->willReturn('hashed_password');
+        $this->repoMock->expects($this->once())->method('save');
+
+        $id = ($this->handler)(new CreateUserCommand('user@test.com', 'secret123'));
+
+        $this->assertInstanceOf(UserId::class, $id);
+    }
+
+    public function testThrowsIfEmailAlreadyExists(): void
+    {
+        $existingUser = User::create(UserId::generate(), 'user@test.com', 'hash');
+        $this->repoMock->method('findByEmail')->willReturn($existingUser);
+
+        $this->expectException(UserAlreadyExistsException::class);
+        ($this->handler)(new CreateUserCommand('user@test.com', 'secret'));
+    }
 }
 ```
 
@@ -186,14 +228,11 @@ export class RoleGuard implements CanActivate {
 
 ## Ce que j'ai appris
 
-Le `BehaviorSubject` dans l'interceptor de refresh token est essentiel.
-Sans lui, si 3 requêtes simultanées reçoivent un 401, on déclenche 3 refresh
-simultanés — ce qui invalide les tokens et déconnecte l'utilisateur.
-
-Avec le pattern ci-dessus, seul le premier 401 déclenche le refresh.
-Les suivants attendent que le `refreshTokenSubject` émette le nouveau token,
-puis repartent avec. C'est un problème de concurrence qui ne se voit
-qu'en conditions réelles — pas en développement local avec une seule requête.
+Séparer l'entité Domain de l'entité Doctrine semble être du travail en double.
+En pratique, c'est ce qui permet de faire évoluer le schéma de base de données
+sans toucher aux règles métier — et inversement. Sur une refonte comme Hermes 2,
+c'est crucial : on peut migrer progressivement le schéma SQL sans régression
+sur la logique applicative, car elles sont dans des couches indépendantes.
 
 ---
 
